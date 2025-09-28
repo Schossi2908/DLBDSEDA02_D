@@ -1,0 +1,291 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+NLP-Pipeline für App-Bewertungen (Deutsch) – von Rohdaten bis Themen
+-------------------------------------------------------------------
+Ziele aus dem Anforderungstext:
+1) Daten bereinigen und filtern (neueste App-Version, Score <= 2, etc.).
+2) Texte in numerische Vektoren umwandeln (Bag-of-Words, TF-IDF).
+3) Themen extrahieren (LSA, LDA).
+
+Voraussetzungen (Python-Pakete):
+    pip install pandas numpy scikit-learn nltk gensim packaging
+
+Erwartetes CSV-Format (reviews.csv):
+    text,score,app_version
+    "Die App stürzt ständig ab",1,"1.2.0"
+
+Ausführung:
+    python nlp_pipeline_reviews.py --csv reviews.csv --topics 8 --lsa-dim 100
+
+Ergebnis:
+    - Übersichtliche Konsolen-Ausgaben
+    - Dateien mit Top-Keywords je Thema (optionale Speicherung)
+"""
+
+import argparse
+import re
+import sys
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+# Vektorisierung & Modelle
+from sklearn.feature_extraction.text import CountVectorizer, TfidfVectorizer
+from sklearn.decomposition import TruncatedSVD
+from sklearn.pipeline import Pipeline
+
+# Für Versionvergleich (neueste App-Version)
+from packaging.version import Version
+
+# NLP (leichtgewichtig mit NLTK)
+import nltk
+from nltk.corpus import stopwords
+from nltk.stem import WordNetLemmatizer
+
+# LDA (gensim)
+import gensim
+from gensim import corpora
+from gensim.models.ldamodel import LdaModel
+
+
+# -----------------------------
+# Hilfsfunktionen
+# -----------------------------
+
+def ensure_nltk():
+    """Sichert benötigte NLTK-Ressourcen (ohne Internet schlägt das ggf. fehl)."""
+    try:
+        nltk.data.find('corpora/stopwords')
+    except LookupError:
+        nltk.download('stopwords')
+    try:
+        nltk.data.find('corpora/wordnet')
+    except LookupError:
+        nltk.download('wordnet')
+    try:
+        nltk.data.find('tokenizers/punkt')
+    except LookupError:
+        nltk.download('punkt')
+
+
+def normalize_text(s: str) -> str:
+    """Einfache Säuberung: Lowercase, URLs & Sonderzeichen entfernen, Whitespace-kürzen."""
+    s = s.lower()
+    s = re.sub(r'https?://\S+|www\.\S+', ' ', s)  # URLs
+    s = re.sub(r'[^a-zäöüß\s]', ' ', s)           # nur Buchstaben und Leerzeichen behalten
+    s = re.sub(r'\s+', ' ', s).strip()
+    return s
+
+
+def tokenize_and_lemmatize(doc: str, lang: str = "german") -> str:
+    """Tokenisierung + Stopwords + Lemmatization (rudimentär, englisch-basiert).
+    Hinweis: WordNet ist englisch; für deutsche Lemmas ggf. spaCy nutzen.
+    Für robuste deutsche Projekte: spaCy('de_core_news_sm') + Lemmatizer verwenden.
+    Hier: wir behalten einfache Normalisierung + Stopwords-Filter.
+    """
+    tokens = nltk.word_tokenize(doc, language="german")
+    # Stopwords
+    try:
+        sw = set(stopwords.words(lang))
+    except OSError:
+        sw = set()
+    # Optionales Lemma (englisch-basiert, daher nur fallback)
+    lemmatizer = WordNetLemmatizer()
+    out = []
+    for t in tokens:
+        if t in sw or len(t) <= 2:
+            continue
+        # Lemma (engl.) – für dt. Wörter neutral/identisch
+        lemma = lemmatizer.lemmatize(t)
+        out.append(lemma)
+    return " ".join(out)
+
+
+def newest_version(df: pd.DataFrame) -> str:
+    """Ermittelt die neueste App-Version per 'packaging.version'."""
+    versions = (
+        df["app_version"]
+        .dropna()
+        .astype(str)
+        .unique()
+        .tolist()
+    )
+    if not versions:
+        return None
+    try:
+        latest = max(versions, key=lambda v: Version(v))
+        return latest
+    except Exception:
+        # Fallback: lexikografisch
+        return max(versions)
+
+
+def filter_reviews(df: pd.DataFrame, positive_words=None, min_words: int = 5) -> pd.DataFrame:
+    """Filtert gemäß Spezifikation: neueste Version, Score <= 2, negative Sprache, mind. Wortanzahl."""
+    if positive_words is None:
+        positive_words = {"gut", "toll", "super", "perfekt", "danke", "zufrieden", "liebe", "großartig", "top"}
+
+    # Neueste Version
+    latest = newest_version(df)
+    if latest is not None:
+        df = df.loc[df["app_version"] == latest].copy()
+
+    # Score <= 2 und nicht null
+    df = df[df["score"].notna()]
+    df = df[df["score"].astype(float) <= 2.0].copy()
+
+    # Textbereinigung + Mindestlänge
+    df["text_clean"] = df["text"].astype(str).apply(normalize_text)
+    df["text_clean"] = df["text_clean"].apply(tokenize_and_lemmatize)
+
+    # Entferne Texte mit positiven Wörtern
+    def is_positive(txt):
+        return any(pw in txt.split() for pw in positive_words)
+
+    df = df[~df["text_clean"].apply(is_positive)].copy()
+
+    # Mindestwortanzahl
+    df["word_count"] = df["text_clean"].str.split().apply(len)
+    df = df[df["word_count"] >= min_words].copy()
+
+    df = df.reset_index(drop=True)
+    return df
+
+
+def top_terms_from_components(components, feature_names, topn=10):
+    """Extrahiert Top-Terme je Komponente/Topic (für LSA)."""
+    topics = []
+    for comp in components:
+        idx = np.argsort(comp)[::-1][:topn]
+        terms = [feature_names[i] for i in idx]
+        topics.append(terms)
+    return topics
+
+
+def print_topics(title, topics):
+    print(f"\n== {title} ==")
+    for i, terms in enumerate(topics):
+        print(f"Topic {i:02d}: " + ", ".join(terms))
+
+
+# -----------------------------
+# Hauptpipeline
+# -----------------------------
+
+def main(args):
+    ensure_nltk()
+
+    csv_path = Path(args.csv)
+    if not csv_path.exists():
+        print(f"[FEHLER] CSV-Datei nicht gefunden: {csv_path.resolve()}", file=sys.stderr)
+        sys.exit(1)
+
+    df = pd.read_csv(csv_path)
+
+    # Minimalprüfung
+    expected_cols = {"text", "score", "app_version"}
+    missing = expected_cols - set(df.columns.str.lower())
+    # Falls Spalten gemischt groß/klein geschrieben sind, normalisieren
+    df.columns = [c.lower() for c in df.columns]
+    missing = expected_cols - set(df.columns)
+    if missing:
+        print(f"[FEHLER] CSV muss Spalten {expected_cols} enthalten. Fehlend: {missing}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"[INFO] Ausgangszeilen: {len(df)}")
+
+    # Filtern gemäß Spezifikation
+    df_filt = filter_reviews(df, min_words=args.min_words)
+    print(f"[INFO] Nach Filterung: {len(df_filt)} (neueste Version, score <= 2, negativ, mind. {args.min_words} Wörter)")
+
+    if len(df_filt) == 0:
+        print("[HINWEIS] Keine Daten nach Filterung. Prüfe Eingabedaten/Parameter.")
+        sys.exit(0)
+
+    texts = df_filt["text_clean"].tolist()
+
+    # ----------------
+    # BoW + LSA
+    # ----------------
+    bow_vec = CountVectorizer(max_df=args.max_df, min_df=args.min_df)
+    X_bow = bow_vec.fit_transform(texts)
+
+    if args.lsa_dim > 0:
+        svd = TruncatedSVD(n_components=args.lsa_dim, random_state=42)
+        X_lsa = svd.fit_transform(X_bow)
+        bow_features = bow_vec.get_feature_names_out()
+        lsa_topics = top_terms_from_components(svd.components_, bow_features, topn=args.topn)
+        print_topics("LSA (auf BoW)", lsa_topics)
+
+    # ----------------
+    # TF-IDF + LSA
+    # ----------------
+    tfidf_vec = TfidfVectorizer(max_df=args.max_df, min_df=args.min_df)
+    X_tfidf = tfidf_vec.fit_transform(texts)
+
+    if args.lsa_dim > 0:
+        svd_tfidf = TruncatedSVD(n_components=args.lsa_dim, random_state=42)
+        X_lsa_tfidf = svd_tfidf.fit_transform(X_tfidf)
+        tfidf_features = tfidf_vec.get_feature_names_out()
+        lsa_topics_tfidf = top_terms_from_components(svd_tfidf.components_, tfidf_features, topn=args.topn)
+        print_topics("LSA (auf TF-IDF)", lsa_topics_tfidf)
+
+    # ----------------
+    # LDA (gensim) – auf BoW-Corpus
+    # ----------------
+    token_lists = [t.split() for t in texts]
+    dictionary = corpora.Dictionary(token_lists)
+
+    # Optional: Extremfilter (häufige/seltene Tokens)
+    dictionary.filter_extremes(no_below=max(2, int(len(token_lists) * 0.01)),  # mind. in 1% der Dok.
+                               no_above=0.5,                                   # höchstens in 50% der Dok.
+                               keep_n=args.keep_n)
+
+    corpus = [dictionary.doc2bow(tokens) for tokens in token_lists]
+
+    if len(dictionary) == 0 or len(corpus) == 0:
+        print("[HINWEIS] Zu wenig Vokabular für LDA nach Filterung.")
+    else:
+        lda = LdaModel(corpus=corpus,
+                       num_topics=args.topics,
+                       id2word=dictionary,
+                       passes=10,
+                       random_state=42,
+                       alpha="auto",
+                       eta="auto")
+        print("\n== LDA (gensim) ==")
+        for i in range(args.topics):
+            terms = lda.show_topic(i, topn=args.topn)
+            terms_str = ", ".join(w for w, _ in terms)
+            print(f"Topic {i:02d}: {terms_str}")
+
+    # Optionale Speicherung
+    if args.out_dir:
+        out = Path(args.out_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        # Speichere gefilterte Daten
+        df_filt.to_csv(out / "filtered_reviews.csv", index=False)
+        # Speichere Top-Wörter (LSA TF-IDF) – falls berechnet
+        if args.lsa_dim > 0:
+            with open(out / "lsa_topics_tfidf.txt", "w", encoding="utf-8") as f:
+                for i, terms in enumerate(lsa_topics_tfidf):
+                    f.write(f"Topic {i:02d}: {', '.join(terms)}\n")
+        print(f"\n[INFO] Ergebnisse gespeichert unter: {out.resolve()}")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="NLP-Pipeline für ChatGPT-Bewertungen (DE).")
+    parser.add_argument("--csv", type=str, default="reviews.csv", help="Pfad zur CSV-Datei mit Bewertungen.")
+    parser.add_argument("--topics", type=int, default=8, help="Anzahl LDA-Themen.")
+    parser.add_argument("--lsa-dim", type=int, default=50, help="Dimensionen für LSA (Truncated SVD). 0 = aus.")
+    parser.add_argument("--topn", type=int, default=10, help="Top-Terme pro Thema.")
+    parser.add_argument("--min-words", type=int, default=5, help="Mindestwortanzahl je Bewertung nach Cleaning.")
+    parser.add_argument("--max-df", type=float, default=0.9, help="max_df für Vectorizer (sehr häufige Terme ignorieren).")
+    parser.add_argument("--min-df", type=int, default=2, help="min_df für Vectorizer (sehr seltene Terme ignorieren).")
+    parser.add_argument("--keep-n", type=int, default=10000, help="Max. Vokabulargröße für LDA (gensim).")
+    parser.add_argument("--out-dir", type=str, default="nlp_outputs", help="Ausgabeverzeichnis.")
+
+    args = parser.parse_args()
+    main(args)
