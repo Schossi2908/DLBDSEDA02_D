@@ -2,7 +2,7 @@
 Portfolio Schostock Aufgabe 1
 
 Website Datensatz:
-https://www.kaggle.com/datasets/ashishkumarak/chatgpt-reviews-daily-updated
+https://www.kaggle.com/datasets/ashishkumarak/chatgpt-reviews-daily-updated [Stand: 02.11.2025]
 
 NLP-Pipeline für App-Bewertungen (Englisch):
 -------------------------------------------------------------------
