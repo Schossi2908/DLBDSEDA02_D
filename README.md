@@ -23,9 +23,10 @@ Ausführung:
     python Auswertung_Chatgpt.py --csv reviews.csv
 
 Ergebnis:
+    - Begrenzung auf maximal 50 Topics (Übersichtlichtkeit der Ergebnisse)
     - Übersichtliche Konsolen-Ausgaben
     - Gefilteres Review.csv als eigene Datei
-    - Dateien mit Top-Keywords je Thema (lokale Speicherung je )
+    - Dateien mit Top-Keywords je Thema (als eigene Datei je Filterung)
     - Themenkohärenz in eigener Datei
 -------------------------------------------------------------------
 
