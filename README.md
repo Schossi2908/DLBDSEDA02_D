@@ -4,7 +4,7 @@ Portfolio Schostock Aufgabe 1
 Website Datensatz:
 https://www.kaggle.com/datasets/ashishkumarak/chatgpt-reviews-daily-updated
 
-NLP-Pipeline für App-Bewertungen (Englisch)
+NLP-Pipeline für App-Bewertungen (Englisch):
 -------------------------------------------------------------------
 Ziele aus dem Anforderungstext:
 1) Daten bereinigen und filtern (neueste App-Version, Score <= 2, etc.).
@@ -13,16 +13,19 @@ Ziele aus dem Anforderungstext:
 4) Themenkohärenz ermitteln.
 
 Voraussetzungen (Python-Pakete):
-    pip install pandas numpy scikit-learn nltk gensim packaging
+-------------------------------------------------------------------
+pip install pandas numpy scikit-learn nltk gensim packaging
 
 Erwartetes CSV-Format (reviews.csv):
-    text,score,app_version
-    "Die App stürzt ständig ab",1,"1.2.0"
+-------------------------------------------------------------------
+text,score,app_version
+"Die App stürzt ständig ab",1,"1.2.0"
 
 Ausführung:
-    python Auswertung_Chatgpt.py --csv reviews.csv
+-------------------------------------------------------------------
+python Auswertung_Chatgpt.py --csv reviews.csv
 
-Ergebnis
+Ergebnis:
 -------------------------------------------------------------------
 1) Begrenzung auf maximal 50 Topics (Übersichtlichtkeit der Ergebnisse)
 2) Übersichtliche Konsolen-Ausgaben
