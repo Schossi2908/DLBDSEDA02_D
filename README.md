@@ -22,13 +22,13 @@ Erwartetes CSV-Format (reviews.csv):
 Ausführung:
     python Auswertung_Chatgpt.py --csv reviews.csv
 
-Ergebnis:
-    - Begrenzung auf maximal 50 Topics (Übersichtlichtkeit der Ergebnisse)
-    - Übersichtliche Konsolen-Ausgaben
-    - Gefilteres Review.csv als eigene Datei
-    - Dateien mit Top-Keywords je Thema (als eigene Datei je Filterung)
-    - Themenkohärenz in eigener Datei
+Ergebnis
 -------------------------------------------------------------------
+1) Begrenzung auf maximal 50 Topics (Übersichtlichtkeit der Ergebnisse)
+2) Übersichtliche Konsolen-Ausgaben
+3) Gefilteres Review.csv als eigene Datei
+4) Dateien mit Top-Keywords je Thema (als eigene Datei je Filterung)
+5) Themenkohärenz in eigener Datei
 
 
 
