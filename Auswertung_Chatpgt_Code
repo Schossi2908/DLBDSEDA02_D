@@ -1,0 +1,231 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+End-to-End Skript
+- CSV laden (text; score; app_version)
+- Cleaning + Filter
+- Vektorisierung: BoW & TF-IDF
+- Themen: LDA (BoW) & LSA/SVD (TF-IDF)
+- Themenkohärenz (UMass-ähnlich) für beide
+"""
+
+import re, argparse
+from pathlib import Path
+import numpy as np
+import pandas as pd
+from pandas.errors import ParserError
+from sklearn.feature_extraction.text import CountVectorizer, TfidfVectorizer
+from sklearn.decomposition import LatentDirichletAllocation, TruncatedSVD
+
+# ---- einfache Defaults ----
+CSV_SEP = ";"         # Standard: Semikolon
+CSV_ENCODING = "utf-8"
+MIN_WORDS = 5
+TOPN = 10
+MAX_TOPICS = 50
+
+# eigene Ausschlusswörter (bei Bedarf anpassen)
+CUSTOM_STOPWORDS = {
+    "like", "chat gpt", "chatgpt","openai","app","ai","gpt","gemini","google",
+    "generate","generated","generates","generating",
+    "gets","getting","gives","giving",
+    "don","doesn","didn","ll","ve","m","t","s","zu"
+}
+
+# ---- Hilfsfunktionen ----
+
+# Text bereinigen
+def clean_text(s: str) -> str:
+    s = str(s).lower()
+    s = re.sub(r'https?://\S+|www\.\S+', ' ', s)
+    s = re.sub(r'[^a-z\s]', ' ', s)
+    return re.sub(r'\s+', ' ', s).strip()
+
+# Filtern nach der neuesten Version
+def newest_version(df: pd.DataFrame) -> str:
+    return max(df["app_version"].dropna().astype(str).unique())
+
+# weitere Funktionen wie in der ersten Phase beschrieben
+def filter_dataset(df: pd.DataFrame) -> pd.DataFrame:
+    df = df[df["app_version"].astype(str) == newest_version(df)].copy()
+    df = df[df["score"].notna() & (df["score"].astype(float) <= 2)].copy()
+    df["text_clean"] = df["text"].astype(str).apply(clean_text)
+    positive = {"best","good","great","awesome","perfect","thanks","love","excellent","amazing","nice","top"}
+    df = df[~df["text_clean"].apply(lambda t: any(w in set(t.split()) for w in positive))].copy()
+    df["word_count"] = df["text_clean"].str.split().map(len)
+    df = df[df["word_count"] >= MIN_WORDS].copy()
+    return df.reset_index(drop=True)
+
+# Vektorisierung nach den beschrieben Methoden
+def vectorize(texts):
+    # BoW: robuster Tokenfilter + Bigrams
+    bow = CountVectorizer(
+        stop_words="english",
+        min_df=5,
+        max_df=0.85,
+        ngram_range=(1, 2),
+        token_pattern=r"(?u)\b[a-zA-Z]{3,}\b"
+    )
+    X_bow_full = bow.fit_transform(texts)
+    vocab_bow_full = np.array(bow.get_feature_names_out())
+    keep_bow = [i for i, w in enumerate(vocab_bow_full) if w not in CUSTOM_STOPWORDS]
+    X_bow = X_bow_full[:, keep_bow]
+    vocab_bow = vocab_bow_full[keep_bow]
+
+    # TF-IDF: gleiche Filter
+    tfidf = TfidfVectorizer(
+        stop_words="english",
+        min_df=5,
+        max_df=0.85,
+        ngram_range=(1, 2),
+        token_pattern=r"(?u)\b[a-zA-Z]{3,}\b"
+    )
+    X_tfidf_full = tfidf.fit_transform(texts)
+    vocab_tfidf_full = np.array(tfidf.get_feature_names_out())
+    keep_tf = [i for i, w in enumerate(vocab_tfidf_full) if w not in CUSTOM_STOPWORDS]
+    X_tfidf = X_tfidf_full[:, keep_tf]
+    vocab_tfidf = vocab_tfidf_full[keep_tf]
+
+    if X_bow.shape[1] == 0 or X_tfidf.shape[1] == 0:
+        raise ValueError("Vokabular leer nach Filtern. Stopwords/Filter anpassen.")
+    return X_bow, vocab_bow, X_tfidf, vocab_tfidf
+
+
+def top_terms(components, vocab, topn=TOPN):
+    topics = []
+    for comp in components:
+        idx = np.argsort(comp)[::-1][:topn]
+        topics.append([vocab[i] for i in idx])
+    return topics
+
+# Themen ausgeben
+def print_topics(title, topics):
+    print(f"\n== {title} ==")
+    for i, terms in enumerate(topics):
+        print(f"Topic {i:02d}: " + ", ".join(terms))
+
+def coherence_umass(topics, X_bow, vocab):
+    """
+    UMass-ähnliche Kohärenz:
+    Mittelwert über log((D(wi,wj)+1)/D(wj)) für alle Wortpaare der Top-Listen.
+    Je näher an 0 (weniger negativ), desto kohärenter.
+    """
+    Xb = X_bow.copy()
+    Xb.data[:] = 1                         # binäre Präsenz
+    idx = {w: i for i, w in enumerate(vocab)}
+    dfc = np.asarray(Xb.sum(axis=0)).ravel()
+
+    scores = []
+    for terms in topics:
+        vals = []
+        for i in range(1, len(terms)):
+            ci = idx.get(terms[i]); 
+            if ci is None: continue
+            col_i = Xb[:, ci]
+            for j in range(i):
+                cj = idx.get(terms[j]); 
+                if cj is None: continue
+                col_j = Xb[:, cj]
+                co = (col_i.T @ col_j)[0, 0]  # gemeinsame Doks
+                dj = dfc[cj]                  # D(w_j)
+                vals.append(np.log((co + 1.0) / (dj + 1e-12)))
+        scores.append(float(np.mean(vals)) if vals else float("nan"))
+    return scores
+
+# ---- Hauptablauf ----
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--csv", required=True, help="Pfad zu data/reviews.csv (Semikolon-CSV).")
+    ap.add_argument("--out", default="nlp_outputs", help="Ausgabe-Ordner.")
+    ap.add_argument("--lda_topics", default="auto", help="Anzahl LDA-Topics oder 'auto'.")
+    ap.add_argument("--lsa_components", default="auto", help="Anzahl LSA-Komponenten oder 'auto'.")
+    args = ap.parse_args()
+
+    out = Path(args.out); out.mkdir(parents=True, exist_ok=True)
+
+    # CSV lesen
+    try:
+        df = pd.read_csv(args.csv, sep=CSV_SEP, encoding=CSV_ENCODING, engine="python")
+    except ParserError:
+        df = pd.read_csv(args.csv, sep=None, encoding=CSV_ENCODING, engine="python", on_bad_lines="skip")
+
+    for col in ["text","score","app_version"]:
+        if col not in df.columns:
+            raise ValueError(f"Spalte '{col}' fehlt in der CSV.")
+
+    print(f"[INFO] Eingelesene Zeilen: {len(df)}")
+    df_f = filter_dataset(df)
+    print(f"[INFO] Zeilen nach Filter: {len(df_f)}")
+    if df_f.empty:
+        print("[HINWEIS] Keine Daten nach Filter.")
+        return
+
+    texts = df_f["text_clean"].tolist()
+    X_bow, vocab_bow, X_tfidf, vocab_tfidf = vectorize(texts)
+
+    # Auto-k
+    n_docs, n_feats = X_tfidf.shape
+    lda_auto = min(max(5, int(np.sqrt(n_docs))), MAX_TOPICS)
+    lsa_auto = min(max(2, int(np.sqrt(min(n_docs, n_feats)))), MAX_TOPICS)
+    lda_k = lda_auto if str(args.lda_topics).lower() == "auto" else int(args.lda_topics)
+    lsa_k = lsa_auto if str(args.lsa_components).lower() == "auto" else int(args.lsa_components)
+
+    # --- LDA (BoW) ---
+    lda = LatentDirichletAllocation(
+        n_components=lda_k,
+        random_state=0,
+        learning_method="batch",
+        doc_topic_prior=0.1,
+        topic_word_prior=0.1,
+        max_iter=30
+    )
+    lda.fit(X_bow)
+    lda_topics = top_terms(lda.components_, vocab_bow, topn=TOPN)
+    print_topics(f"LDA (BoW) – k={lda_k}", lda_topics)
+
+    # Kohärenz für LDA (auf BoW)
+    lda_coh = coherence_umass(lda_topics, X_bow, vocab_bow)
+    avg_lda = float(np.nanmean(lda_coh)) if len(lda_coh) else float("nan")
+    print("\n== LDA-Kohärenz (UMass-ähnlich) ==")
+    for i, c in enumerate(lda_coh):
+        print(f"Topic {i:02d}: {c:.4f}")
+    print(f"Durchschnitt LDA: {avg_lda:.4f}")
+    with open(out / "lda_coherence.txt","w",encoding="utf-8") as f:
+        for i, c in enumerate(lda_coh):
+            f.write(f"Topic {i:02d}: {c:.4f}\n")
+        f.write(f"Average: {avg_lda:.4f}\n")
+
+    # --- LSA (TF-IDF) ---
+    svd = TruncatedSVD(n_components=lsa_k, random_state=0)
+    svd.fit(X_tfidf)
+    lsa_topics = top_terms(svd.components_, vocab_tfidf, topn=TOPN)
+    print_topics(f"LSA (TF-IDF) – k={lsa_k}", lsa_topics)
+
+    # Kohärenz für LSA: ebenfalls auf BoW-Basis messen
+    lsa_coh = coherence_umass(lsa_topics, X_bow, vocab_bow)
+    avg_lsa = float(np.nanmean(lsa_coh)) if len(lsa_coh) else float("nan")
+    print("\n== LSA-Kohärenz (UMass-ähnlich) ==")
+    for i, c in enumerate(lsa_coh):
+        print(f"Topic {i:02d}: {c:.4f}")
+    print(f"Durchschnitt LSA: {avg_lsa:.4f}")
+    with open(out / "lsa_coherence.txt","w",encoding="utf-8") as f:
+        for i, c in enumerate(lsa_coh):
+            f.write(f"Topic {i:02d}: {c:.4f}\n")
+        f.write(f"Average: {avg_lsa:.4f}\n")
+
+    # Ergebnisse speichern
+    df_f[["text","score","app_version","text_clean","word_count"]].to_csv(
+        out / "filtered_reviews.csv", index=False, encoding="utf-8"
+    )
+    with open(out / "lda_topics_bow.txt","w",encoding="utf-8") as f:
+        for i, ts in enumerate(lda_topics):
+            f.write(f"Topic {i:02d}: {', '.join(ts)}\n")
+    with open(out / "lsa_topics_tfidf.txt","w",encoding="utf-8") as f:
+        for i, ts in enumerate(lsa_topics):
+            f.write(f"Topic {i:02d}: {', '.join(ts)}\n")
+
+    print(f"\n[INFO] Ergebnisse gespeichert unter: {Path(args.out).resolve()}")
+    print("[INFO] Dateien: filtered_reviews.csv, lda_topics_bow.txt, lsa_topics_tfidf.txt, lda_coherence.txt, lsa_coherence.txt")
+
+if __name__ == "__main__":
+    main()
